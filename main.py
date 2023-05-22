@@ -6,30 +6,24 @@ from collections import defaultdict
 import os
 from collections import defaultdict
 
-
 def load_data(file_path):
     with open(file_path, 'r', encoding='utf-8') as f:
-        data = [nltk.word_tokenize(line) for line in f.readlines()]
+        data = [['<START>'] + nltk.word_tokenize(line) + ['<STOP>'] for line in f.readlines()]
     return data
 
-def count_bigrams(data):
+def calculate_freq_dists(data):
+    unigram_freqdist = nltk.FreqDist()
     bigram_freqdist = defaultdict(lambda: defaultdict(int))
-
+    trigram_freqdist = defaultdict(lambda: defaultdict(int))
+    
     for sentence in data:
+        unigram_freqdist.update(ngrams(sentence, 1))
         for i in range(len(sentence) - 1):
             bigram_freqdist[sentence[i]][sentence[i + 1]] += 1
+        for i in range(len(sentence) - 2):
+            trigram_freqdist[(sentence[i], sentence[i + 1])][sentence[i + 2]] += 1
 
-    return bigram_freqdist
-
-def calculate_freq_dists(data):
-    unigrams = [gram for line in data for gram in ngrams(line, 1)]
-    bigrams = count_bigrams(data) 
-    trigrams = [gram for line in data for gram in ngrams(line, 3, pad_left=True, pad_right=True)]
-
-    unigram_freqdist = nltk.FreqDist(unigrams)
-    trigram_freqdist = nltk.FreqDist(trigrams)
-
-    return unigram_freqdist, bigrams, trigram_freqdist
+    return unigram_freqdist, bigram_freqdist, trigram_freqdist
 
 def calculate_perplexity(unigram_freqdist, bigram_freqdist, trigram_freqdist, data):
     unigram_pplx = calculate_unigram_perplexity(unigram_freqdist, data)
@@ -40,54 +34,26 @@ def calculate_perplexity(unigram_freqdist, bigram_freqdist, trigram_freqdist, da
 
 def calculate_unigram_perplexity(unigram_freqdist, data):
     total_logprob = 0
-    N = 0
-    for sentence in data:
-        for word in sentence:
-            N += 1
-            try:
-                # Calculate the probability of the word
-                word_prob = unigram_freqdist.freq(word)
-                # Add the log probability of the word to the total
-                total_logprob += np.log(word_prob)
-            except ValueError:
-                # If the word is not in the unigram_freqdist, it is considered as <UNK>
-                word_prob = unigram_freqdist.freq('<UNK>')
-                total_logprob += np.log(word_prob)
+    N = sum(unigram_freqdist.values())
+    for unigram in unigram_freqdist:
+        word_prob = unigram_freqdist.freq(unigram)
+        total_logprob += unigram_freqdist[unigram] * np.log(word_prob)
 
-    # Calculate perplexity
-    perplexity = np.exp(-total_logprob/N)
-
-    return perplexity
+    return np.exp(-total_logprob/N)
 
 def calculate_bigram_perplexity(bigram_freqdist, unigram_freqdist, data):
     total_logprob = 0
     N = 0
+    V = len(unigram_freqdist)  # size of vocabulary
     for sentence in data:
         prev_word = None
         for word in sentence:
             if prev_word is not None:
                 N += 1
-                try:
-                    # Calculate the probability of the word
-                    if unigram_freqdist[prev_word] == 0:
-                        if '<UNK>' in unigram_freqdist:
-                            word_prob = bigram_freqdist[prev_word]['<UNK>'] / unigram_freqdist['<UNK>']
-                        else:
-                            word_prob = 0  # Assign a zero probability if '<UNK>' is not present
-                    else:
-                        word_prob = bigram_freqdist[prev_word][word] / unigram_freqdist[prev_word]
-                    # Add the log probability of the word to the total
-                    if word_prob != 0:  # Check for zero probability
-                        total_logprob += np.log(word_prob)
-                    else:
-                        total_logprob += np.log(1e-10)  # Assign a small value for zero probability
-                except (KeyError, ZeroDivisionError):
-                    # If the bigram or unigram frequency is missing, use <UNK> probability
-                    if '<UNK>' in bigram_freqdist[prev_word]:
-                        word_prob = bigram_freqdist[prev_word]['<UNK>'] / unigram_freqdist['<UNK>']
-                    else:
-                        word_prob = 0  # Assign a zero probability if '<UNK>' is not present
-                    total_logprob += np.log(word_prob)
+                # Add one for smoothing and calculate the probability of the word
+                word_prob = (bigram_freqdist[prev_word][word] + 1) / (unigram_freqdist[prev_word] + V)
+                # Add the log probability of the word to the total
+                total_logprob += np.log(word_prob)
             prev_word = word
 
     # Calculate perplexity
@@ -95,36 +61,24 @@ def calculate_bigram_perplexity(bigram_freqdist, unigram_freqdist, data):
 
     return perplexity
 
-
 def calculate_trigram_perplexity(trigram_freqdist, bigram_freqdist, data):
     total_logprob = 0
     N = 0
+    V = len(bigram_freqdist)  # size of vocabulary
     for sentence in data:
         prev_word1 = None
         prev_word2 = None
         for word in sentence:
             if prev_word1 is not None and prev_word2 is not None:
                 N += 1
-                try:
-                    # Check if the trigram exists in the frequency distribution
-                    if word in trigram_freqdist[(prev_word1, prev_word2)]:
-                        # Calculate the probability of the word
-                        word_prob = trigram_freqdist[(prev_word1, prev_word2)][word] / bigram_freqdist[prev_word1][prev_word2]
-                        # Add the log probability of the word to the total
-                        if word_prob != 0:  # Check for zero denominator
-                            total_logprob += np.log(word_prob)
-                        else:
-                            total_logprob += np.log(1e-10)  # Assign a small value for zero probability
-                    else:
-                        # If the trigram is not in the trigram_freqdist, it is considered as <UNK>
-                        word_prob = trigram_freqdist[(prev_word1, prev_word2)]['<UNK>'] / bigram_freqdist[prev_word1][prev_word2]
-                        if word_prob != 0:  # Check for zero denominator
-                            total_logprob += np.log(word_prob)
-                        else:
-                            total_logprob += np.log(1e-10)  # Assign a small value for zero probability
-                except KeyError:
-                    # If the trigram is not found, assign a small probability value
-                    total_logprob += np.log(1e-10)
+                # Add one for smoothing and calculate the probability of the word
+                if prev_word2 == '<START>':
+                    # Use bigram probability for the word immediately after <START>
+                    word_prob = (bigram_freqdist[prev_word2][word] + 1) / (unigram_freqdist[prev_word2] + V)
+                else:
+                    word_prob = (trigram_freqdist.get(prev_word1, {}).get(prev_word2, {}).get(word, 0) + 1) / (bigram_freqdist.get(prev_word1, {}).get(prev_word2, 0) + V)
+                # Add the log probability of the word to the total
+                total_logprob += np.log(word_prob)
             prev_word1, prev_word2 = prev_word2, word
 
     # Calculate perplexity
